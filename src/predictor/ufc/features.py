@@ -16,7 +16,7 @@ import math
 from dataclasses import dataclass
 from datetime import date
 
-from predictor.core.vector import Vector
+from src.predictor.core.vector import Vector
 from predictor.ufc.elo import UfcEloSystem
 
 
