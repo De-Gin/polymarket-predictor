@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from predictor.core.math_utils import exp_freshness, sigmoid, tanh_saturate
+from src.predictor.core.math_utils import exp_freshness, sigmoid, tanh_saturate
 
 
 class TestSigmoid:
