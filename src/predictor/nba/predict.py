@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from src.predictor.core.domain import Event, EventKind, Outcome
-from src.predictor.core.vector_space import PredictionSummary, VectorSpace
+from predictor.core.domain import Event, EventKind, Outcome
+from predictor.core.vector_space import PredictionSummary, VectorSpace
 from predictor.nba.elo import NbaEloSystem
 from predictor.nba.features import GameContext, extract_game_vectors
 

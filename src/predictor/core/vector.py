@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from src.predictor.core.math_utils import exp_freshness, tanh_saturate
+from predictor.core.math_utils import exp_freshness, tanh_saturate
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ def replace_vector(v: Vector, **changes: object) -> Vector:
     return replace(v, **changes)
 
 
-# Re-export for convenience; callers can `from src.predictor.core.vector import replace_vector`.
+# Re-export for convenience; callers can `from predictor.core.vector import replace_vector`.
 __all__ = ["Vector", "replace_vector"]
 
 

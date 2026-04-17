@@ -22,6 +22,9 @@ ENV/
 *.swp
 *.swo
 
+# Claude Code local settings
+.claude/
+
 # Testing / coverage
 .pytest_cache/
 .coverage

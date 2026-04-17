@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from src.predictor.core.vector import Vector
+from predictor.core.vector import Vector
 from predictor.nba.elo import HOME_COURT_ELO, NbaEloSystem
 
 

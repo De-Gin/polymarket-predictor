@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from src.predictor.core.domain import Event, EventKind, Outcome
-from src.predictor.core.vector_space import PredictionSummary, VectorSpace
+from predictor.core.domain import Event, EventKind, Outcome
+from predictor.core.vector_space import PredictionSummary, VectorSpace
 from predictor.ufc.elo import UfcEloSystem
 from predictor.ufc.features import FightContext, FighterProfile, extract_fight_vectors
 
