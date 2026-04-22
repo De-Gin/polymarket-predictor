@@ -29,7 +29,12 @@ from predictor.eval.edge import edge_vs_market
 from predictor.nba.data import fetch_season_games, games_before, merge_to_games
 from predictor.nba.elo import NbaEloSystem
 from predictor.nba.predict import predict_game
+from predictor.polymarket.client import fetch_events_by_tag
+from predictor.polymarket.ufc_matcher import extract_fight_markets
 from predictor.ufc.data import load_fights
+from predictor.ufc.elo import UfcEloSystem
+from predictor.ufc.predict import predict_fight
+from predictor.ufc.profile_lookup import latest_profile
 
 app = typer.Typer(
     help="Vector-based prediction engine for NBA + UFC, targeting Polymarket edge.",
@@ -216,6 +221,136 @@ def ufc_backtest(
         skip_warmup_fights=warmup,
     )
     _report(result.probabilities, result.outcomes, label=f"UFC ({csv.name})")
+
+
+@ufc_app.command("scan")
+def ufc_scan(
+    csv: Path = typer.Option(..., help="UFC fights CSV (same schema as `backtest`)"),
+    min_edge: float = typer.Option(
+        0.03, help="Hide fights where |edge| is below this (in probability units)"
+    ),
+    sensitivity: float = typer.Option(1.0, help="Sigmoid sensitivity"),
+    naive: bool = typer.Option(False, help="Disable correlation-aware aggregation"),
+) -> None:
+    """Scan live Polymarket UFC markets and rank by model edge.
+
+    Pulls every active UFC event from Polymarket's Gamma API, keeps the
+    moneyline markets, and predicts each fight using the Elo state built from
+    the CSV history.
+    """
+    if not csv.exists():
+        raise typer.BadParameter(f"CSV not found: {csv}")
+
+    fights = load_fights(csv)
+    console.print(f"Loaded {len(fights)} historical fights from {csv}.")
+
+    # Train Elo on everything in the CSV.
+    elo = UfcEloSystem()
+    for row in fights.itertuples(index=False):
+        elo.record_fight(
+            fighter_a_id=row.fighter_a_id,
+            fighter_b_id=row.fighter_b_id,
+            result=row.result,
+            fight_date=row.fight_date,
+            title_fight=bool(getattr(row, "title_fight", False)),
+        )
+    console.print(f"Trained UFC Elo on {len(fights)} fights.")
+
+    # Fetch active UFC events from Polymarket.
+    try:
+        events = fetch_events_by_tag("ufc", limit=500)
+    except Exception as e:
+        console.print(f"[red]Polymarket fetch failed: {e}[/red]")
+        raise typer.Exit(1) from e
+    fight_markets = extract_fight_markets(events)
+    console.print(
+        f"Polymarket: {len(events)} active UFC events, "
+        f"{len(fight_markets)} moneyline fight markets."
+    )
+
+    rows: list[dict] = []
+    skipped_missing = 0
+
+    for fm in fight_markets:
+        today = date.today()
+        fd = fm.fight_date or today
+
+        profile_a = latest_profile(fights, fm.fighter_a_name, as_of=fd)
+        profile_b = latest_profile(fights, fm.fighter_b_name, as_of=fd)
+        if profile_a is None or profile_b is None:
+            skipped_missing += 1
+            continue
+
+        pred = predict_fight(
+            fighter_a=profile_a,
+            fighter_b=profile_b,
+            fight_date=fd,
+            elo_system=elo,
+            sensitivity=sensitivity,
+            correlation_aware=not naive,
+            a_name=fm.fighter_a_name,
+            b_name=fm.fighter_b_name,
+        )
+        model_a = pred.fighter_a_win_probability
+        model_b = pred.fighter_b_win_probability
+
+        # Per-side edge. Pick whichever side has the larger positive edge.
+        edge_a = model_a - fm.price_a
+        edge_b = model_b - fm.price_b
+        if edge_a >= edge_b:
+            side_name, model_p, market_p, edge = fm.fighter_a_name, model_a, fm.price_a, edge_a
+        else:
+            side_name, model_p, market_p, edge = fm.fighter_b_name, model_b, fm.price_b, edge_b
+
+        rows.append(
+            {
+                "date": fd.isoformat() if fm.fight_date else "unknown",
+                "event": fm.event_title,
+                "side": side_name,
+                "model": model_p,
+                "market": market_p,
+                "edge": edge,
+            }
+        )
+
+    if skipped_missing:
+        console.print(
+            f"[yellow]Skipped {skipped_missing} fights — fighter not in CSV history.[/yellow]"
+        )
+    if not rows:
+        console.print("[red]No scannable fights found.[/red]")
+        raise typer.Exit(0)
+
+    rows.sort(key=lambda r: r["edge"], reverse=True)
+
+    tbl = Table(
+        title=f"Polymarket UFC edges (threshold |edge| >= {min_edge:.2f})",
+        show_header=True,
+    )
+    tbl.add_column("Date", style="dim")
+    tbl.add_column("Side", style="bold")
+    tbl.add_column("Model", justify="right")
+    tbl.add_column("Market", justify="right")
+    tbl.add_column("Edge", justify="right")
+    tbl.add_column("Event", style="dim")
+
+    shown = 0
+    for r in rows:
+        if abs(r["edge"]) < min_edge:
+            continue
+        color = "green" if r["edge"] > 0 else "red"
+        tbl.add_row(
+            r["date"],
+            r["side"],
+            f"{r['model'] * 100:.1f}%",
+            f"{r['market'] * 100:.1f}%",
+            f"[{color}]{r['edge'] * 100:+.1f}pp[/{color}]",
+            r["event"][:60],
+        )
+        shown += 1
+
+    console.print(tbl)
+    console.print(f"Shown {shown} of {len(rows)} scanned fights.")
 
 
 # ---------------------------------------------------------------------------
