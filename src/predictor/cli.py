@@ -34,7 +34,7 @@ from predictor.polymarket.ufc_matcher import extract_fight_markets
 from predictor.ufc.data import load_fights
 from predictor.ufc.elo import UfcEloSystem
 from predictor.ufc.predict import predict_fight
-from predictor.ufc.profile_lookup import latest_profile
+from predictor.ufc.profile_lookup import fight_count, latest_profile
 
 app = typer.Typer(
     help="Vector-based prediction engine for NBA + UFC, targeting Polymarket edge.",
@@ -229,6 +229,20 @@ def ufc_scan(
     min_edge: float = typer.Option(
         0.03, help="Hide fights where |edge| is below this (in probability units)"
     ),
+    min_fights: int = typer.Option(
+        3,
+        help="Skip fights where either fighter has fewer than N records in the CSV "
+        "(kills cold-start inflation for debut/little-known fighters).",
+    ),
+    min_liquidity: float = typer.Option(
+        0.0,
+        help="Skip Polymarket markets with liquidity below this USD threshold.",
+    ),
+    max_spread: float = typer.Option(
+        1.0,
+        help="Skip markets where bid-ask spread (for outcome[0]) exceeds this. "
+        "e.g. --max-spread 0.05 drops markets wider than 5pp.",
+    ),
     sensitivity: float = typer.Option(1.0, help="Sigmoid sensitivity"),
     naive: bool = typer.Option(False, help="Disable correlation-aware aggregation"),
 ) -> None:
@@ -270,15 +284,31 @@ def ufc_scan(
 
     rows: list[dict] = []
     skipped_missing = 0
+    skipped_cold_start = 0
+    skipped_thin = 0
+    skipped_wide = 0
 
     for fm in fight_markets:
         today = date.today()
         fd = fm.fight_date or today
 
+        if fm.liquidity < min_liquidity:
+            skipped_thin += 1
+            continue
+        if fm.spread is not None and fm.spread > max_spread:
+            skipped_wide += 1
+            continue
+
         profile_a = latest_profile(fights, fm.fighter_a_name, as_of=fd)
         profile_b = latest_profile(fights, fm.fighter_b_name, as_of=fd)
         if profile_a is None or profile_b is None:
             skipped_missing += 1
+            continue
+
+        fc_a = fight_count(fights, fm.fighter_a_name, as_of=fd)
+        fc_b = fight_count(fights, fm.fighter_b_name, as_of=fd)
+        if fc_a < min_fights or fc_b < min_fights:
+            skipped_cold_start += 1
             continue
 
         pred = predict_fight(
@@ -294,13 +324,30 @@ def ufc_scan(
         model_a = pred.fighter_a_win_probability
         model_b = pred.fighter_b_win_probability
 
-        # Per-side edge. Pick whichever side has the larger positive edge.
-        edge_a = model_a - fm.price_a
-        edge_b = model_b - fm.price_b
-        if edge_a >= edge_b:
-            side_name, model_p, market_p, edge = fm.fighter_a_name, model_a, fm.price_a, edge_a
+        # Executable edge = model_p − ask_price (what you actually PAY).
+        # Falls back to mid when ask is unavailable. The mid edge is reported
+        # alongside so you can see how much the spread is eating.
+        buy_a = fm.ask_a if fm.ask_a is not None else fm.price_a
+        buy_b = fm.ask_b if fm.ask_b is not None else fm.price_b
+        exec_edge_a = model_a - buy_a
+        exec_edge_b = model_b - buy_b
+
+        if exec_edge_a >= exec_edge_b:
+            side_name = fm.fighter_a_name
+            model_p = model_a
+            mid_p = fm.price_a
+            buy_p = buy_a
+            edge_mid = model_a - fm.price_a
+            edge_exec = exec_edge_a
+            coverage = fc_a
         else:
-            side_name, model_p, market_p, edge = fm.fighter_b_name, model_b, fm.price_b, edge_b
+            side_name = fm.fighter_b_name
+            model_p = model_b
+            mid_p = fm.price_b
+            buy_p = buy_b
+            edge_mid = model_b - fm.price_b
+            edge_exec = exec_edge_b
+            coverage = fc_b
 
         rows.append(
             {
@@ -308,30 +355,59 @@ def ufc_scan(
                 "event": fm.event_title,
                 "side": side_name,
                 "model": model_p,
-                "market": market_p,
-                "edge": edge,
+                "mid": mid_p,
+                "buy": buy_p,
+                "edge_mid": edge_mid,
+                "edge": edge_exec,  # sort key — executable edge
+                "coverage": coverage,
+                "liquidity": fm.liquidity,
+                "volume": fm.volume,
+                "spread": fm.spread,
             }
         )
 
     if skipped_missing:
         console.print(
-            f"[yellow]Skipped {skipped_missing} fights — fighter not in CSV history.[/yellow]"
+            f"[yellow]Skipped {skipped_missing} fights — fighter not in CSV.[/yellow]"
+        )
+    if skipped_cold_start:
+        console.print(
+            f"[yellow]Skipped {skipped_cold_start} fights — either fighter has "
+            f"< {min_fights} CSV records (cold-start filter).[/yellow]"
+        )
+    if skipped_thin:
+        console.print(
+            f"[yellow]Skipped {skipped_thin} fights — liquidity < "
+            f"${min_liquidity:,.0f}.[/yellow]"
+        )
+    if skipped_wide:
+        console.print(
+            f"[yellow]Skipped {skipped_wide} fights — spread > "
+            f"{max_spread * 100:.0f}pp.[/yellow]"
         )
     if not rows:
-        console.print("[red]No scannable fights found.[/red]")
+        console.print("[red]No scannable fights after filters.[/red]")
         raise typer.Exit(0)
 
     rows.sort(key=lambda r: r["edge"], reverse=True)
 
     tbl = Table(
-        title=f"Polymarket UFC edges (threshold |edge| >= {min_edge:.2f})",
+        title=(
+            f"Polymarket UFC  |  executable |edge|>={min_edge:.2f}  "
+            f"min_fights={min_fights}  min_liq=${min_liquidity:,.0f}  "
+            f"max_spread={max_spread * 100:.0f}pp"
+        ),
         show_header=True,
     )
     tbl.add_column("Date", style="dim")
     tbl.add_column("Side", style="bold")
     tbl.add_column("Model", justify="right")
-    tbl.add_column("Market", justify="right")
+    tbl.add_column("Mid", justify="right")
+    tbl.add_column("Buy@", justify="right")
     tbl.add_column("Edge", justify="right")
+    tbl.add_column("Sprd", justify="right", style="dim")
+    tbl.add_column("Fghts", justify="right", style="dim")
+    tbl.add_column("Liq $", justify="right", style="dim")
     tbl.add_column("Event", style="dim")
 
     shown = 0
@@ -339,18 +415,26 @@ def ufc_scan(
         if abs(r["edge"]) < min_edge:
             continue
         color = "green" if r["edge"] > 0 else "red"
+        spread_str = f"{r['spread'] * 100:.1f}pp" if r["spread"] is not None else "—"
         tbl.add_row(
             r["date"],
             r["side"],
             f"{r['model'] * 100:.1f}%",
-            f"{r['market'] * 100:.1f}%",
+            f"{r['mid'] * 100:.1f}%",
+            f"{r['buy'] * 100:.1f}%",
             f"[{color}]{r['edge'] * 100:+.1f}pp[/{color}]",
-            r["event"][:60],
+            spread_str,
+            str(r["coverage"]),
+            f"{r['liquidity']:,.0f}",
+            r["event"][:45],
         )
         shown += 1
 
     console.print(tbl)
-    console.print(f"Shown {shown} of {len(rows)} scanned fights.")
+    console.print(
+        f"Shown {shown} of {len(rows)} scanned fights. "
+        f"'Edge' is executable (model minus ask), not mid."
+    )
 
 
 # ---------------------------------------------------------------------------
