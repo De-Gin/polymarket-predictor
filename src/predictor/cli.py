@@ -34,7 +34,7 @@ from predictor.polymarket.ufc_matcher import extract_fight_markets
 from predictor.ufc.data import load_fights
 from predictor.ufc.elo import UfcEloSystem
 from predictor.ufc.predict import predict_fight
-from predictor.ufc.profile_lookup import fight_count, latest_profile
+from predictor.ufc.profile_lookup import fight_count, latest_profile, overlay_windowed
 
 app = typer.Typer(
     help="Vector-based prediction engine for NBA + UFC, targeting Polymarket edge.",
@@ -206,6 +206,10 @@ def ufc_backtest(
     sensitivity: float = typer.Option(1.0, help="Sigmoid sensitivity"),
     naive: bool = typer.Option(False, help="Disable correlation-aware aggregation"),
     warmup: int = typer.Option(200, help="Fights to skip at the start for Elo burn-in"),
+    windowed: bool = typer.Option(
+        False,
+        help="Overlay ufcstats last-10-fights windowed stats (requires data/ufcstats/fights.parquet).",
+    ),
 ) -> None:
     """Replay a UFC fight history CSV and score the model."""
     if not csv.exists():
@@ -213,12 +217,15 @@ def ufc_backtest(
 
     fights = load_fights(csv)
     console.print(f"Loaded {len(fights)} fights from {csv}.")
+    if windowed:
+        console.print("[dim]Windowed ufcstats stats enabled.[/dim]")
 
     result = backtest_ufc(
         fights,
         sensitivity=sensitivity,
         correlation_aware=not naive,
         skip_warmup_fights=warmup,
+        use_windowed_stats=windowed,
     )
     _report(result.probabilities, result.outcomes, label=f"UFC ({csv.name})")
 
@@ -304,6 +311,10 @@ def ufc_scan(
         if profile_a is None or profile_b is None:
             skipped_missing += 1
             continue
+
+        # Overlay ufcstats windowed stats if available (no-op if parquet missing).
+        profile_a = overlay_windowed(profile_a, fm.fighter_a_name, as_of=fd)
+        profile_b = overlay_windowed(profile_b, fm.fighter_b_name, as_of=fd)
 
         fc_a = fight_count(fights, fm.fighter_a_name, as_of=fd)
         fc_b = fight_count(fights, fm.fighter_b_name, as_of=fd)

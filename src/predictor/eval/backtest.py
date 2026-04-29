@@ -21,6 +21,7 @@ from predictor.nba.predict import predict_game
 from predictor.ufc.elo import UfcEloSystem
 from predictor.ufc.features import FighterProfile
 from predictor.ufc.predict import predict_fight
+from predictor.ufc.profile_lookup import overlay_windowed
 
 
 @dataclass
@@ -132,6 +133,7 @@ def backtest_ufc(
     sensitivity: float = 1.0,
     correlation_aware: bool = True,
     skip_warmup_fights: int = 200,
+    use_windowed_stats: bool = False,
 ) -> BacktestResult:
     """Run a chronological backtest over UFC fights.
 
@@ -166,6 +168,9 @@ def backtest_ufc(
         if i >= skip_warmup_fights and result_val != "D":
             a_profile = _profile_from_row(row, a_id, attr_cols_a)
             b_profile = _profile_from_row(row, b_id, attr_cols_b)
+            if use_windowed_stats:
+                a_profile = overlay_windowed(a_profile, row.fighter_a_name, as_of=fight_date)
+                b_profile = overlay_windowed(b_profile, row.fighter_b_name, as_of=fight_date)
             pred = predict_fight(
                 fighter_a=a_profile,
                 fighter_b=b_profile,

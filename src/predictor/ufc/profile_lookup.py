@@ -84,6 +84,37 @@ def latest_profile(
     return _row_profile(last, side="b", fighter_id=str(last["fighter_b_id"]))
 
 
+def overlay_windowed(
+    profile: FighterProfile | None,
+    fighter_name: str,
+    as_of: date | None = None,
+    n: int = 10,
+) -> FighterProfile | None:
+    """Enrich a profile with rolling-window stats from the ufcstats parquet.
+
+    No-op if:
+      - profile is None,
+      - the ufcstats parquet doesn't exist (never scraped/parsed),
+      - the fighter isn't in the parquet or has too few recent fights.
+
+    Import is local so modules can be used without the parquet present.
+    """
+    if profile is None:
+        return None
+    try:
+        from predictor.ufc.windowed_stats import (
+            apply_to_profile,
+            windowed_stats,
+        )
+    except Exception:
+        return profile
+    try:
+        ws = windowed_stats(fighter_name, as_of=as_of, n=n)
+    except FileNotFoundError:
+        return profile
+    return apply_to_profile(profile, ws)
+
+
 def fight_count(fights: pd.DataFrame, fighter_name: str, as_of: date | None = None) -> int:
     """Return the number of fights the fighter appears in, up to `as_of` if given."""
     target = _norm(fighter_name)

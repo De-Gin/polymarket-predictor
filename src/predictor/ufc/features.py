@@ -68,6 +68,9 @@ def extract_fight_vectors(ctx: FightContext, elo_system: UfcEloSystem) -> list[V
     b_state = elo_system.get_state(b.fighter_id)
 
     # --- Elo differential (primary) ------------------------------------------
+    # Note: an attempt to scale reliability by min(total_fights) regressed BSS
+    # in backtest. Cold-start "edge inflation" is a scan-time pricing issue
+    # against Polymarket — handled there via the --min-fights filter, not here.
     elo_diff = b_state.rating - a_state.rating
     vectors.append(
         Vector.from_signed_score(
@@ -137,26 +140,40 @@ def extract_fight_vectors(ctx: FightContext, elo_system: UfcEloSystem) -> list[V
             )
 
     # --- Striking differential ----------------------------------------------
-    # Net striking = (slpm * str_acc) - (sapm * (1 - str_def))
-    def _net_striking(p: FighterProfile) -> float | None:
-        if None in (p.slpm, p.str_acc, p.sapm, p.str_def):
+    # Ideal signal: net striking = (slpm * str_acc) - (sapm * (1 - str_def)).
+    # When defensive stats (sapm, str_def) are missing — true for the Kaggle
+    # dataset — fall back to offensive output only (slpm * str_acc) and drop
+    # reliability. Better than silently dropping the whole vector.
+    def _striking_signal(p: FighterProfile) -> tuple[float, bool] | None:
+        if p.slpm is None or p.str_acc is None:
             return None
-        return p.slpm * p.str_acc - p.sapm * (1 - p.str_def)  # type: ignore[operator]
+        offense = p.slpm * p.str_acc
+        if p.sapm is not None and p.str_def is not None:
+            return offense - p.sapm * (1 - p.str_def), True
+        return offense, False
 
-    ns_a = _net_striking(a)
-    ns_b = _net_striking(b)
-    if ns_a is not None and ns_b is not None:
+    sig_a = _striking_signal(a)
+    sig_b = _striking_signal(b)
+    if sig_a is not None and sig_b is not None:
+        ns_a, full_a = sig_a
+        ns_b, full_b = sig_b
         striking_diff = ns_b - ns_a
+        both_full = full_a and full_b
         vectors.append(
             Vector.from_signed_score(
-                source_id="striking_net",
-                source_name=f"Net striking diff ({striking_diff:+.2f})",
+                source_id="striking_net" if both_full else "striking_offense",
+                source_name=(
+                    f"Net striking diff ({striking_diff:+.2f})"
+                    if both_full
+                    else f"Offensive striking diff ({striking_diff:+.2f})"
+                ),
                 category="striking",
                 group="striking",
                 data_date=ref,
                 raw_score=striking_diff,
-                scale=0.6,
-                reliability=0.60,
+                # Offense-only is a weaker signal; reduce scale and reliability.
+                scale=0.6 if both_full else 0.4,
+                reliability=0.60 if both_full else 0.40,
             )
         )
 
