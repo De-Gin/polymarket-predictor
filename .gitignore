@@ -39,6 +39,7 @@ Thumbs.db
 # Data caches (raw API dumps — regenerable)
 data/raw/
 data/cache/
+data/ufcstats/raw_html/
 *.csv.gz
 *.parquet
 
